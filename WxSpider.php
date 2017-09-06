@@ -8,10 +8,18 @@ use app\utils\network\Network;
 class WxSpider{
 
     private $network;
+    private $domain = "http://mp.weixin.qq.com";
     function __construct()
     {
         $this->network = new Network();
         $this->network->setOption(CURLOPT_HEADER, true);
+        $headers = array();
+        $headers[] = 'User-Agent:Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/60.0.3112.113 Safari/537.36';
+        
+
+        $this->network->setOption(CURLOPT_HTTPHEADER, $headers);
+
+
         $this->network->setOption(CURLOPT_COOKIEJAR, "./cookie.txt");
         $this->network->setOption(CURLOPT_COOKIEFILE, "./cookie.txt");
     }
@@ -31,22 +39,16 @@ class WxSpider{
     {
         $url = "http://weixin.sogou.com/weixin?type=1&query=$keyword&ie=utf8";
         $data = $this->getData($url);
-
-        $pattern = "/onclick=\"gotourl\(\'(.*?)\'/is";//获取公众账号的文字列表地址
+        //
+        //href="http://mp.weixin.qq.com/profile?src=3&timestamp=1504661757&ver=1&signature=HgstaX7vi-prrQBHI*KsOcYzLlL*3Bvd6633U06qIqp4n3nkpYJhG-k*8Ji7h91NCxdI5fIzNT04PgGyy9oSTw=="
+        $pattern = "/account_name_\d+\"\shref=\"(.*?)\"/is";//获取公众账号的文字列表地址
         if(preg_match_all($pattern, $data, $matches))
         {
+
             foreach ($matches[1] as $key => $value)
             {
-                $this->toNext = false;
-                $pattern = "/openid=(.*?)&amp;ext=(.*)/i";//得到openid以及ext
-                if(preg_match($pattern, $value,$infos))
-                {
-                    $this->getPageList($infos[1], $infos[2], 1);
-                }
-                else
-                {
-                    WxSpider::error('not get openid info '.$value);
-                }
+                $this->getPageList($value, 1);
+                
             }
         }
         else
@@ -65,28 +67,25 @@ class WxSpider{
      * @param  [type] $page   [description]
      * @return [type]         [description]
      */
-    public function getPageList($openid, $ext, $page)
+    public function getPageList($url,$page)
     {
-
-        $url = "http://weixin.sogou.com/gzhjs?cb=sogou.weixin.gzhcb&openid=%s&ext=%s&gzhArtKeyWord=&page=%d&t=%s";
-
+        $url = html_entity_decode($url);
         list($t1, $t2) = explode(' ', microtime());
         $time = (float)sprintf('%.0f',(floatval($t1)+floatval($t2))*1000);//毫秒时间戳
 
-        $url = sprintf($url,$openid,$ext,$page,$time);
-        $pattern = "/sogou\.weixin\.gzhcb\((\{.*?\]\})\)/is";
-        $data = $this->getData($url);
-        if(preg_match_all($pattern, $data, $matchs))
-        {
-            if( isset($matchs[1]) && isset($matchs[1][0]) )
-            {
-                $data = json_decode($matchs[1][0],true);
+        
+        $pattern = "/var\s+msgList\s+=\s+(\{[\s\S]*?\});/is";
 
-                $this->getItems($data['items']);
-                if($data['totalPages'] > $data['page'])
-                {
-                    $this->getPageList($openid,$ext, $data['page']+1);
-                }
+        $data = $this->getData($url);
+
+        if(preg_match($pattern, $data, $matchs))
+        {
+            
+            if( isset($matchs[1])  )
+            {
+                $data = json_decode($matchs[1],true);
+                $this->getItems($data['list']);
+                
             }
         }
         else
@@ -103,46 +102,36 @@ class WxSpider{
      */
     public function getItems($data)
     {
+
         if(!$data)
         {
             WxSpider::error('列表数据空 ');
              return;
         }
 
-        //解析列表xml
+        //解析列表
         foreach($data as $item)
         {
 
-            $xml = simplexml_load_string(iconv('utf-8',"gb2312//IGNORE",$item),'SimpleXMLElement', LIBXML_NOCDATA);
-            if(!$xml)
-            {
-                WxSpider::error('xml数据错误 ');
-                continue;
-            }
-            if(!$xml->item->display)
-            {
-                WxSpider::error('xml数据错误 ');
-                continue;
-            }
-            $xml = (array)$xml->item->display;
 
-            $item = [];
 
-            $item = [
-                'docid'=>$xml['docid'],
-                'title'=>$xml['title'],
-                'url'=>$xml['url'],
-                'imglink'=>$xml['imglink'],
-                'contentSort'=>$xml['content168'],
-                'sourcename'=>$xml['sourcename']
+            $extinfo = $item["app_msg_ext_info"];
+            $common = $item['comm_msg_info'];
+            $article = [
+                'docid'=>$common['id'],
+                'title'=>$extinfo['title'],
+                'url'=>$this->domain. html_entity_decode($extinfo['content_url']),
+                'imglink'=>$extinfo['cover'],
+                'sourcename'=>$extinfo['author']
             ];
-            if( !$this->getContent($item) )
+
+            if( !$this->getContent($article) )
             {
                 WxSpider::error('获取内容错误 ');
                 continue;
             }
 
-            $this->createData($item);
+            $this->createData($article);
             sleep(5);//等待，避免频率过快
 
         }
@@ -161,14 +150,14 @@ class WxSpider{
             WxSpider::error('没有url信息 ');
             return;
         }
-        $url = "http://weixin.sogou.com".$item['url'];
-        $data = $this->getData($url);
+        
+        $data = $this->getData($item['url']);
 
         $pattern = "/js_content\">(.*?)<\/div>/is";
         if( preg_match($pattern, $data, $matchs) )
         {
             $str = str_replace("data-src", "src", $matchs[1]);
-            $item['content'] = $str;
+            $item['content'] = trim($str);
             return true;
         }
 
@@ -181,7 +170,8 @@ class WxSpider{
      */
     private function createData($item)
     {
-        var_dump($item);die;
+        file_put_contents('./data', json_encode($item,JSON_UNESCAPED_UNICODE),FILE_APPEND);
+
         //to save data
     }
 
